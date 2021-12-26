@@ -1,0 +1,1 @@
+java -cp build/dependencies/*:build/classes/kotlin/main MainKt linux:0:3c
