@@ -45,66 +45,70 @@ enum class SSD1306Command(val code: Int) {
     ;
 
     companion object {
-        val writePrefix = listOf(
-            SSD1306Command.SSD1306_CTRL_BYTE_CMD_STREAM.code,
-            // column 0 to 127
-            SSD1306Command.SSD1306_CMD_SET_COLUMN_RANGE.code,
+        val initDisplay = listOf(
+            SSD1306_CTRL_BYTE_CMD_STREAM.code,
+            SSD1306_CMD_DISPLAY_OFF.code,
+            SSD1306_CMD_SET_MUX_RATIO.code,
+            0x3F,
+            // Set the display offset to 0
+            SSD1306_CMD_SET_DISPLAY_OFFSET.code,
             0x00,
-            0x7F,
-            // page 0 to 7
-            SSD1306Command.SSD1306_CMD_SET_PAGE_RANGE.code,
+            // Display start line to 0
+            SSD1306_CMD_SET_DISPLAY_START_LINE.code,
+            // Mirror the x-axis. In case you set it up such that the pins are north.
+            // 0xA0 - in case pins are south - default
+            SSD1306_CMD_SET_SEGMENT_REMAP.code,
+            // Mirror the y-axis. In case you set it up such that the pins are north.
+            // 0xC0 - in case pins are south - default
+            SSD1306_CMD_SET_COM_SCAN_MODE.code,
+            // Default - alternate COM pin map
+            SSD1306_CMD_SET_COM_PIN_MAP.code,
+            0x12,
+            // set contrast
+            SSD1306_CMD_SET_CONTRAST.code,
+            0x1F,
+            // Set display to enable rendering from GDDRAM
+            // (Graphic Display Data RAM)
+            SSD1306_CMD_DISPLAY_RAM.code,
+            // Normal mode!
+            SSD1306_CMD_DISPLAY_NORMAL.code,
+            // Default oscillator clock
+            SSD1306_CMD_SET_DISPLAY_CLK_DIV.code,
+            0x80,
+            // Enable the charge pump
+            SSD1306_CMD_SET_CHARGE_PUMP.code,
+            0x14,
+            // Set precharge cycles to high cap type
+            SSD1306_CMD_SET_PRECHARGE.code,
+            0x22,
+            // Set the V_COMH deselect volatage to max
+            SSD1306_CMD_SET_VCOMH_DESELCT.code,
+            0x30,
+            // Horizonatal addressing mode - same as the KS108 GLCD
+            SSD1306_CMD_SET_MEMORY_ADDR_MODE.code,
             0x00,
-            0x07
+            // A[1:0] = 00, Horizontal Addressing Mode
+            // A[1:0] = 01, Vertical Addressing Mode
+            // A[1:0] = 10, Page Addressing Mode
+
+            // Turn the Display ON
+            SSD1306_CMD_DISPLAY_ON.code
         ).map {
+            // print(it.toString(16).padStart(2, '0') + " ")
             it.toByte()
         }.toByteArray()
 
-        val initDisplay = listOf(
-            SSD1306Command.SSD1306_CTRL_BYTE_CMD_STREAM.code,
-            SSD1306Command.SSD1306_CMD_DISPLAY_OFF.code,
-            SSD1306Command.SSD1306_CMD_SET_MUX_RATIO.code,
-            0x3F,
-            // Set the display offset to 0
-            SSD1306Command.SSD1306_CMD_SET_DISPLAY_OFFSET.code,
+        val writePrefix = listOf(
+            SSD1306_CTRL_BYTE_CMD_STREAM.code,
+            // column 0 to 127
+            SSD1306_CMD_SET_COLUMN_RANGE.code,
             0x00,
-            // Display start line to 0
-            SSD1306Command.SSD1306_CMD_SET_DISPLAY_START_LINE.code,
-            // Mirror the x-axis. In case you set it up such that the pins are north.
-            // 0xA0 - in case pins are south - default
-            SSD1306Command.SSD1306_CMD_SET_SEGMENT_REMAP.code,
-            // Mirror the y-axis. In case you set it up such that the pins are north.
-            // 0xC0 - in case pins are south - default
-            SSD1306Command.SSD1306_CMD_SET_COM_SCAN_MODE.code,
-            // Default - alternate COM pin map
-            SSD1306Command.SSD1306_CMD_SET_COM_PIN_MAP.code,
-            0x12,
-            // set contrast
-            SSD1306Command.SSD1306_CMD_SET_CONTRAST.code,
             0x7F,
-            // Set display to enable rendering from GDDRAM
-            // (Graphic Display Data RAM)
-            SSD1306Command.SSD1306_CMD_DISPLAY_RAM.code,
-            // Normal mode!
-            SSD1306Command.SSD1306_CMD_DISPLAY_NORMAL.code,
-            // Default oscillator clock
-            SSD1306Command.SSD1306_CMD_SET_DISPLAY_CLK_DIV.code,
-            0x80,
-            // Enable the charge pump
-            SSD1306Command.SSD1306_CMD_SET_CHARGE_PUMP.code,
-            0x14,
-            // Set precharge cycles to high cap type
-            SSD1306Command.SSD1306_CMD_SET_PRECHARGE.code,
-            0x22,
-            // Set the V_COMH deselect volatage to max
-            SSD1306Command.SSD1306_CMD_SET_VCOMH_DESELCT.code,
-            0x30,
-            // Horizonatal addressing mode - same as the KS108 GLCD
-            SSD1306Command.SSD1306_CMD_SET_MEMORY_ADDR_MODE.code,
+            // page 0 to 7
+            SSD1306_CMD_SET_PAGE_RANGE.code,
             0x00,
-            // Turn the Display ON
-            SSD1306Command.SSD1306_CMD_DISPLAY_ON.code
+            0x07
         ).map {
-            // print(it.toString(16).padStart(2, '0') + " ")
             it.toByte()
         }.toByteArray()
     }
@@ -123,6 +127,21 @@ sealed class I2CConnection {
 
     fun write(bytes: ByteArray) {
         lastWrites.tryEmit(bytes)
+
+        when (bytes[0]) {
+            SSD1306Command.SSD1306_CTRL_BYTE_CMD_STREAM.code.toByte() -> {
+                // Commands
+                bufOffset = 0
+            }
+            SSD1306Command.SSD1306_CTRL_BYTE_DATA_STREAM.code.toByte() -> {
+                // Data
+                System.arraycopy(bytes, 1, buffer, bufOffset, bytes.size - 1)
+                bufOffset += bytes.size - 1
+
+                screenFlow.tryEmit(buffer.clone())
+            }
+        }
+
         writeImpl(bytes, 0, bytes.size)
     }
 
@@ -145,6 +164,12 @@ sealed class I2CConnection {
         }
     }
 
+    private val buffer = ByteArray(1024)
+    private var bufOffset = 0 // Offset in buffer
+
+    val screenFlow = MutableSharedFlow<ByteArray>(200, 20, BufferOverflow.DROP_OLDEST)
+
+    // NOP device
     class Trace : I2CConnection() {
         override val name = "${javaClass.simpleName.lowercase(Locale.ENGLISH)}"
 

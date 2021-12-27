@@ -18,6 +18,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.*
 import javax.imageio.ImageIO
+import kotlin.experimental.or
 import kotlin.reflect.full.isSubclassOf
 import kotlin.reflect.full.primaryConstructor
 import kotlin.reflect.jvm.jvmErasure
@@ -149,8 +150,52 @@ fun main(args: Array<String>) = runBlocking {
                                 "<a href='./${
                                     dd.name.lowercase(Locale.ENGLISH)
                                 }?device=${dev.id}'>${dd.name.lowercase(Locale.ENGLISH)}</a>"
-                            }
+                            } + "&nbsp;" + "<a href='./screen?device=${dev.id}'>screen</a>"
                         })
+                    }
+                })
+            }
+
+            router.get("/screen").coroutineHandler {
+                val devId = rc.request().getParam("device")
+                val dev = devId?.let { id ->
+                    devices.firstOrNull {
+                        it.id == id
+                    }
+                }
+
+                htmlAsFlow(flow {
+                    html("Screen") {
+                        if (dev == null) {
+                            emit("Device ${devId} not found")
+                        } else {
+                            emit("<pre id='screen'></pre>")
+                            emitAll(dev.screenFlow.map { ba_ ->
+                                val scr = Array<Array<Boolean>>(64) {
+                                    Array<Boolean>(128) { false }
+                                }
+                                ba_.withIndex().forEach { (idx, b) ->
+                                    val x = idx % 128
+                                    val yy = idx / 128 * 8
+                                    for (ii in 0..7) {
+                                        scr[yy + ii][x] = (b.toInt().shr(ii)).and(1) == 1
+                                    }
+                                }
+                                """
+                                    <script>
+                                        var f = document.getElementById("screen");
+                                        f.innerHTML = "${
+                                            scr.withIndex().joinToString("\\n") { (idx, chunk) ->
+                                                    idx.toString().padStart(2, '0') + " " +  
+                                                    chunk.joinToString("") { 
+                                                        if (it) "X" else "."
+                                                    }
+                                                } 
+                                        }";
+                                    </script>
+                                """.trimIndent()
+                            })
+                        }
                     }
                 })
             }
@@ -198,14 +243,14 @@ fun main(args: Array<String>) = runBlocking {
     val bi = BufferedImage(width, height, BufferedImage.TYPE_BYTE_BINARY)
 
     val ig2 = bi.createGraphics()
-    // ig2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+    ig2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
-    val font = Font("Times", Font.BOLD, height * 9 / 10)
+    val font = Font("Arial", Font.BOLD, height)
     ig2.font = font
-    val message = "A"
+    val message = "Hell"
 
-    val c = Color.BLACK
-    val color = Color.WHITE
+    val c = Color.WHITE
+    val color = Color.BLACK
     ig2.paint = color
     ig2.fillRect(0, 0, width, height)
 
@@ -243,12 +288,35 @@ fun main(args: Array<String>) = runBlocking {
 
                     val buffer = ByteArray(1024) { 0 }
                     val currSec = (System.currentTimeMillis() / 1000)
+                    // buffer.fill(0xaa.toByte())
+                    if (currSec % 3 != 0L) {
+                        val graphicsBuf = (bi.data.dataBuffer as DataBufferByte).data
+
+                        graphicsBuf.withIndex().forEach { (idx, b) ->
+                            for (ii in 0..7) {
+                                val x = (idx * 8 + (8 - ii)) % 128
+                                val y = idx / 16
+                                //
+                                if ((b.toInt().shr(ii)).and(1) == 1) {
+                                    // println("$x, $y")
+                                    val byteIdx = (y / 8) * 128 + x
+                                    // println("$byteIdx")
+                                    buffer[byteIdx] = buffer[byteIdx].or(1.shl(y % 8).toByte())
+                                }
+                            }
+                        }
+                    } else {
+                        System.arraycopy(ByteArray(1024) { it.and(0xff).toByte() }, 0,
+                            buffer, 0, buffer.size)
+                    }
+
+                    /*
                     if (currSec % 3 == 1L) {
                         r.nextBytes(buffer)
                     } else if (currSec % 3 == 2L) {
                         // buffer.fill(0xaa.toByte())
-                        System.arraycopy((bi.data.dataBuffer as DataBufferByte).data, 0, buffer, 0, stepp)
                     }
+                     */
 
                     for (off in 0 until buffer.size step stepp) {
                         System.arraycopy(buffer, off, smallBuf, 1, stepp)
