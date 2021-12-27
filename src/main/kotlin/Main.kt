@@ -10,13 +10,11 @@ import io.vertx.ext.web.Router
 import io.vertx.ext.web.RoutingContext
 import io.vertx.kotlin.coroutines.CoroutineVerticle
 import io.vertx.kotlin.coroutines.await
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
+import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.launch
 import java.util.*
 import kotlin.reflect.KType
 import kotlin.reflect.full.createType
@@ -24,6 +22,8 @@ import kotlin.reflect.full.isSubclassOf
 import kotlin.reflect.full.isSubtypeOf
 import kotlin.reflect.full.primaryConstructor
 import kotlin.reflect.jvm.jvmErasure
+import kotlin.time.ExperimentalTime
+import kotlin.time.measureTime
 
 enum class SSD1306Command(val code: Int) {
     SSD1306_CTRL_BYTE_CMD_SINGLE       (0x80),
@@ -62,7 +62,8 @@ enum class SSD1306Command(val code: Int) {
     SSD1306_CMD_SET_CHARGE_PUMP        (0x8D),
 }
 
-fun main(args: Array<String>) {
+@OptIn(ExperimentalTime::class)
+fun main(args: Array<String>) = runBlocking {
     val vertx = Vertx.vertx()
     val port = 8087
 
@@ -112,7 +113,7 @@ fun main(args: Array<String>) {
             }
         }
 
-        final override suspend fun start() {
+        override suspend fun start() {
             val router = Router.router(vertx)
 
             router.get("/").coroutineHandler {
@@ -144,7 +145,7 @@ fun main(args: Array<String>) {
 
     val devices = args.map { ds ->
         val splits = ds.split(":")
-        val d = I2CConnection::class.sealedSubclasses.firstOrNull {
+        I2CConnection::class.sealedSubclasses.firstOrNull {
             it.simpleName?.lowercase(Locale.ENGLISH) == splits[0]
         }?.primaryConstructor?.let { pc ->
             pc.call(
@@ -163,55 +164,102 @@ fun main(args: Array<String>) {
                 }.toTypedArray()
             )
         } ?: error("Can't create device ${ds}")
+    }
 
-        d.write(listOf(
-            SSD1306Command.SSD1306_CTRL_BYTE_CMD_STREAM.code,
-            SSD1306Command.SSD1306_CMD_DISPLAY_OFF.code,
-            SSD1306Command.SSD1306_CMD_SET_MUX_RATIO.code,
-            0x3F,
-            // Set the display offset to 0
-            SSD1306Command.SSD1306_CMD_SET_DISPLAY_OFFSET.code,
-            0x00,
-            // Display start line to 0
-            SSD1306Command.SSD1306_CMD_SET_DISPLAY_START_LINE.code,
-            // Mirror the x-axis. In case you set it up such that the pins are north.
-            // 0xA0 - in case pins are south - default
-            SSD1306Command.SSD1306_CMD_SET_SEGMENT_REMAP.code,
-            // Mirror the y-axis. In case you set it up such that the pins are north.
-            // 0xC0 - in case pins are south - default
-            SSD1306Command.SSD1306_CMD_SET_COM_SCAN_MODE.code,
-            // Default - alternate COM pin map
-            SSD1306Command.SSD1306_CMD_SET_COM_PIN_MAP.code,
-            0x12,
-            // set contrast
-            SSD1306Command.SSD1306_CMD_SET_CONTRAST.code,
-            0x7F,
-            // Set display to enable rendering from GDDRAM
-            // (Graphic Display Data RAM)
-            SSD1306Command.SSD1306_CMD_DISPLAY_RAM.code,
-            // Normal mode!
-            SSD1306Command.SSD1306_CMD_DISPLAY_NORMAL.code,
-            // Default oscillator clock
-            SSD1306Command.SSD1306_CMD_SET_DISPLAY_CLK_DIV.code,
-            0x80,
-            // Enable the charge pump
-            SSD1306Command.SSD1306_CMD_SET_CHARGE_PUMP.code,
-            0x14,
-            // Set precharge cycles to high cap type
-            SSD1306Command.SSD1306_CMD_SET_PRECHARGE.code,
-            0x22,
-            // Set the V_COMH deselect volatage to max
-            SSD1306Command.SSD1306_CMD_SET_VCOMH_DESELCT.code,
-            0x30,
-            // Horizonatal addressing mode - same as the KS108 GLCD
-            SSD1306Command.SSD1306_CMD_SET_MEMORY_ADDR_MODE.code,
-            0x00,
-            // Turn the Display ON
-            SSD1306Command.SSD1306_CMD_DISPLAY_ON.code
-        ).map {
-            // print(it.toString(16).padStart(2, '0') + " ")
-            it.toByte()
-        }.toByteArray())
+    devices.forEach { d ->
+        launch(Dispatchers.IO) {
+            d.write(listOf(
+                SSD1306Command.SSD1306_CTRL_BYTE_CMD_STREAM.code,
+                SSD1306Command.SSD1306_CMD_DISPLAY_OFF.code,
+                SSD1306Command.SSD1306_CMD_SET_MUX_RATIO.code,
+                0x3F,
+                // Set the display offset to 0
+                SSD1306Command.SSD1306_CMD_SET_DISPLAY_OFFSET.code,
+                0x00,
+                // Display start line to 0
+                SSD1306Command.SSD1306_CMD_SET_DISPLAY_START_LINE.code,
+                // Mirror the x-axis. In case you set it up such that the pins are north.
+                // 0xA0 - in case pins are south - default
+                SSD1306Command.SSD1306_CMD_SET_SEGMENT_REMAP.code,
+                // Mirror the y-axis. In case you set it up such that the pins are north.
+                // 0xC0 - in case pins are south - default
+                SSD1306Command.SSD1306_CMD_SET_COM_SCAN_MODE.code,
+                // Default - alternate COM pin map
+                SSD1306Command.SSD1306_CMD_SET_COM_PIN_MAP.code,
+                0x12,
+                // set contrast
+                SSD1306Command.SSD1306_CMD_SET_CONTRAST.code,
+                0x7F,
+                // Set display to enable rendering from GDDRAM
+                // (Graphic Display Data RAM)
+                SSD1306Command.SSD1306_CMD_DISPLAY_RAM.code,
+                // Normal mode!
+                SSD1306Command.SSD1306_CMD_DISPLAY_NORMAL.code,
+                // Default oscillator clock
+                SSD1306Command.SSD1306_CMD_SET_DISPLAY_CLK_DIV.code,
+                0x80,
+                // Enable the charge pump
+                SSD1306Command.SSD1306_CMD_SET_CHARGE_PUMP.code,
+                0x14,
+                // Set precharge cycles to high cap type
+                SSD1306Command.SSD1306_CMD_SET_PRECHARGE.code,
+                0x22,
+                // Set the V_COMH deselect volatage to max
+                SSD1306Command.SSD1306_CMD_SET_VCOMH_DESELCT.code,
+                0x30,
+                // Horizonatal addressing mode - same as the KS108 GLCD
+                SSD1306Command.SSD1306_CMD_SET_MEMORY_ADDR_MODE.code,
+                0x00,
+                // Turn the Display ON
+                SSD1306Command.SSD1306_CMD_DISPLAY_ON.code
+            ).map {
+                // print(it.toString(16).padStart(2, '0') + " ")
+                it.toByte()
+            }.toByteArray()
+            )
+
+            while (true) {
+                measureTime {
+                    d.write(
+                        listOf(
+                            SSD1306Command.SSD1306_CTRL_BYTE_CMD_STREAM.code,
+                            // column 0 to 127
+                            SSD1306Command.SSD1306_CMD_SET_COLUMN_RANGE.code,
+                            0x00,
+                            0x7F,
+                            // page 0 to 7
+                            SSD1306Command.SSD1306_CMD_SET_PAGE_RANGE.code,
+                            0x00,
+                            0x07
+                        ).map {
+                            // print(it.toString(16).padStart(2, '0') + " ")
+                            it.toByte()
+                        }.toByteArray()
+                    )
+
+                    val r = Random(System.currentTimeMillis())
+                    val buffer = ByteArray(1024) { 0x0A.toByte() }
+                    if ((System.currentTimeMillis() / 1000) % 2 == 0L) {
+                        r.nextBytes(buffer)
+                    }
+
+                    val stepp = 1024
+                    val smallBuf = ByteArray(1 + stepp)
+                    smallBuf[0] = SSD1306Command.SSD1306_CTRL_BYTE_DATA_STREAM.code.toByte()
+
+                    for (off in 0 until buffer.size step stepp) {
+                        System.arraycopy(buffer, off, smallBuf, 1, stepp)
+                        d.write(smallBuf)
+                    }
+                }.let {
+                    println("${it.inWholeMilliseconds} ms")
+                }
+
+                delay(25)
+                // println("------------------")
+                // println("Screen has updated")
+            }
+        }
     }
 
     /*

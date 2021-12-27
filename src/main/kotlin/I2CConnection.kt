@@ -4,7 +4,7 @@ import com.pi4j.io.i2c.I2C
 import com.pi4j.io.i2c.I2CProvider
 
 sealed class I2CConnection {
-    abstract fun write(bytes: ByteArray)
+    abstract fun write(bytes: ByteArray, offset: Int = 0, length: Int = bytes.size)
 
     class Linux(val bus: Int, val device: Int) : I2CConnection() {
         val pi4j: Context = Pi4J.newAutoContext()
@@ -16,16 +16,19 @@ sealed class I2CConnection {
             .build()
         val displayDevice = i2cProvider.create(i2cConfig)
 
-        override fun write(bytes: ByteArray) {
-            displayDevice.write(bytes)
+        override fun write(bytes: ByteArray, offset: Int, length: Int) {
+            displayDevice.write(bytes, offset, length)
         }
     }
 
     class Trace : I2CConnection() {
-        override fun write(bytes: ByteArray) {
-            println(bytes.joinToString(" ") {
-                it.toInt().and(0xff).toString(16).padStart(2, '0')
-            })
+        override fun write(bytes: ByteArray, offset: Int, length: Int) {
+            println(bytes
+                .asList()
+                .subList(offset, offset + length)
+                .joinToString(" ") {
+                    it.toInt().and(0xff).toString(16).padStart(2, '0')
+                })
         }
     }
 }
