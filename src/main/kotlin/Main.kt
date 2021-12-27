@@ -1,7 +1,3 @@
-import com.pi4j.Pi4J
-import com.pi4j.context.Context
-import com.pi4j.io.i2c.I2C
-import com.pi4j.io.i2c.I2CProvider
 import io.vertx.core.Vertx
 import io.vertx.core.buffer.Buffer
 import io.vertx.core.http.HttpServerOptions
@@ -11,61 +7,70 @@ import io.vertx.ext.web.RoutingContext
 import io.vertx.kotlin.coroutines.CoroutineVerticle
 import io.vertx.kotlin.coroutines.await
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.*
+import java.awt.Color
+import java.awt.Font
+import java.awt.RenderingHints
+import java.awt.image.BufferedImage
+import java.awt.image.DataBufferByte
+import java.io.ByteArrayOutputStream
+import java.nio.file.Files
+import java.nio.file.Path
 import java.util.*
-import kotlin.reflect.KType
-import kotlin.reflect.full.createType
+import javax.imageio.ImageIO
 import kotlin.reflect.full.isSubclassOf
-import kotlin.reflect.full.isSubtypeOf
 import kotlin.reflect.full.primaryConstructor
 import kotlin.reflect.jvm.jvmErasure
 import kotlin.time.ExperimentalTime
 import kotlin.time.measureTime
 
-enum class SSD1306Command(val code: Int) {
-    SSD1306_CTRL_BYTE_CMD_SINGLE       (0x80),
-    SSD1306_CTRL_BYTE_CMD_STREAM       (0x00),
-    SSD1306_CTRL_BYTE_DATA_STREAM      (0x40),
+enum class DeviceData {
+    FRAMES {
+        override fun dataFlow(d: I2CConnection): Flow<String> =
+            d.lastFrames.map { "<div>$it</div>" }
+    },
+    WRITES {
+        override fun dataFlow(d: I2CConnection): Flow<String> =
+            d.lastWrites.map { "<div>${it.joinToString("&nbsp;") { byte ->
+                byte.toInt()
+                    .and(0xff)
+                    .toString(16)
+                    .uppercase(Locale.ENGLISH)
+                    .padStart(2, '0')
+            }}</div>" }
+    },
+    ;
 
-    // Fundamental commands (page 28)
-    SSD1306_CMD_SET_CONTRAST           (0x81),
-    SSD1306_CMD_DISPLAY_RAM            (0xA4),
-    SSD1306_CMD_DISPLAY_ALLON          (0xA5),
-    SSD1306_CMD_DISPLAY_NORMAL         (0xA6),
-    SSD1306_CMD_DISPLAY_INVERTED       (0xA7),
-    SSD1306_CMD_DISPLAY_OFF            (0xAE),
-    SSD1306_CMD_DISPLAY_ON             (0xAF),
-
-    // Addressing Command Table (page 30)
-    SSD1306_CMD_SET_MEMORY_ADDR_MODE   (0x20),
-    SSD1306_CMD_SET_COLUMN_RANGE       (0x21),
-    SSD1306_CMD_SET_PAGE_RANGE         (0x22),
-
-    // Hardware Config (page 31)
-    SSD1306_CMD_SET_DISPLAY_START_LINE (0x40),
-    SSD1306_CMD_SET_SEGMENT_REMAP      (0xA1),
-    SSD1306_CMD_SET_MUX_RATIO          (0xA8),
-    SSD1306_CMD_SET_COM_SCAN_MODE      (0xC8),
-    SSD1306_CMD_SET_DISPLAY_OFFSET     (0xD3),
-    SSD1306_CMD_SET_COM_PIN_MAP        (0xDA),
-    SSD1306_CMD_NOP                    (0xE3),
-
-    // Timing and Driving Scheme (page 32)
-    SSD1306_CMD_SET_DISPLAY_CLK_DIV    (0xD5),
-    SSD1306_CMD_SET_PRECHARGE          (0xD9),
-    SSD1306_CMD_SET_VCOMH_DESELCT      (0xDB),
-
-    // Charge Pump (page 62)
-    SSD1306_CMD_SET_CHARGE_PUMP        (0x8D),
+    abstract fun dataFlow(d: I2CConnection): Flow<String>
 }
 
 @OptIn(ExperimentalTime::class)
 fun main(args: Array<String>) = runBlocking {
     val vertx = Vertx.vertx()
     val port = 8087
+
+    val devices = args.map { ds ->
+        val splits = ds.split(":")
+        I2CConnection::class.sealedSubclasses.firstOrNull {
+            it.simpleName?.lowercase(Locale.ENGLISH) == splits[0]
+        }?.primaryConstructor?.let { pc ->
+            pc.call(
+                *splits.drop(1).zip(pc.parameters).map { (o, p) ->
+                    if (p.type.jvmErasure.isSubclassOf(String::class)) {
+                        o
+                    } else if (p.type.jvmErasure.isSubclassOf(Int::class)) {
+                        o.toInt(16)
+                    } else if (p.type.jvmErasure.isSubclassOf(Boolean::class)) {
+                        o.toBoolean()
+                    } else {
+                        error("Unsupported type ${p.name}")
+                    }
+                }.also {
+                    println(it.joinToString(" "))
+                }.toTypedArray()
+            )
+        } ?: error("Can't create device ${ds}")
+    }
 
     vertx.deployVerticle(object : CoroutineVerticle() {
         fun Route.coroutineHandler(fn: suspend CoroutineHandler.(c: RoutingContext) -> Unit) {
@@ -113,18 +118,62 @@ fun main(args: Array<String>) = runBlocking {
             }
         }
 
+        suspend fun FlowCollector<String>.html(
+            title: String,
+            content: suspend FlowCollector<String>.() -> Unit) {
+
+            emit("<html lang=\"en\">")
+            emit("<head><title>$title</title></head>")
+            emit("<body>")
+            content()
+            emit("</body>")
+            emit("</html>")
+        }
+
         override suspend fun start() {
             val router = Router.router(vertx)
 
             router.get("/").coroutineHandler {
                 htmlAsFlow(flow {
-                    emit("<html>")
-                    emit("<head><title>Test</title><head>")
-                    emit("<body>")
-                    emit("Hello")
-                    emit("</body>")
-                    emit("</html>")
+                    html("Main") {
+                        emit("Main page")
+                    }
                 })
+            }
+
+            router.get("/devices").coroutineHandler {
+                htmlAsFlow(flow {
+                    html("Devices") {
+                        emit(devices.joinToString("<br/>") { dev ->
+                            "${dev.name}: " + DeviceData.values().joinToString("&nbsp;") { dd ->
+                                "<a href='./${
+                                    dd.name.lowercase(Locale.ENGLISH)
+                                }?device=${dev.id}'>${dd.name.lowercase(Locale.ENGLISH)}</a>"
+                            }
+                        })
+                    }
+                })
+            }
+
+            DeviceData.values().forEach { dd ->
+                router.get("/${dd.name.lowercase(Locale.ENGLISH)}").coroutineHandler {
+                    val devId = rc.request().getParam("device")
+                    val dev = devId?.let { id ->
+                        devices.firstOrNull {
+                            it.id == id
+                        }
+                    }
+
+                    htmlAsFlow(flow {
+                        html("Frames") {
+                            if (dev == null) {
+                                emit("Device ${devId} not found")
+                            } else {
+                                emitAll(dd.dataFlow(dev))
+                            }
+                        }
+                    })
+                }
             }
 
             vertx.createHttpServer(
@@ -143,116 +192,70 @@ fun main(args: Array<String>) = runBlocking {
 
     println("Server is running on port $port")
 
-    val devices = args.map { ds ->
-        val splits = ds.split(":")
-        I2CConnection::class.sealedSubclasses.firstOrNull {
-            it.simpleName?.lowercase(Locale.ENGLISH) == splits[0]
-        }?.primaryConstructor?.let { pc ->
-            pc.call(
-                *splits.drop(1).zip(pc.parameters).map { (o, p) ->
-                    if (p.type.jvmErasure.isSubclassOf(String::class)) {
-                        o
-                    } else if (p.type.jvmErasure.isSubclassOf(Int::class)) {
-                        o.toInt(16)
-                    } else if (p.type.jvmErasure.isSubclassOf(Boolean::class)) {
-                        o.toBoolean()
-                    } else {
-                        error("Unsupported type ${p.name}")
-                    }
-                }.also {
-                    println(it.joinToString(" "))
-                }.toTypedArray()
-            )
-        } ?: error("Can't create device ${ds}")
+
+    val width = 128
+    val height = 64
+    val bi = BufferedImage(width, height, BufferedImage.TYPE_BYTE_BINARY)
+
+    val ig2 = bi.createGraphics()
+    // ig2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+    val font = Font("Times", Font.BOLD, height * 9 / 10)
+    ig2.font = font
+    val message = "A"
+
+    val c = Color.BLACK
+    val color = Color.WHITE
+    ig2.paint = color
+    ig2.fillRect(0, 0, width, height)
+
+    try {
+        val fontMetrics = ig2.fontMetrics
+        val stringWidth = fontMetrics.stringWidth(message)
+        val stringHeight = fontMetrics.ascent - fontMetrics.descent
+
+        ig2.paint = c
+
+        ig2.drawString(message,
+            (width - stringWidth) / 2,
+            height - (height - stringHeight) / 2 - 1)
+
+        // ig2.drawOval(0, 0, width - 1, height - 1)
+    } catch (e: Throwable) {
+        // Can't draw strings
     }
 
+    // ImageIO.write(bi, "PNG", Files.newOutputStream(Path.of("/tmp/out.png")))
+
     devices.forEach { d ->
-        launch(Dispatchers.IO) {
-            d.write(listOf(
-                SSD1306Command.SSD1306_CTRL_BYTE_CMD_STREAM.code,
-                SSD1306Command.SSD1306_CMD_DISPLAY_OFF.code,
-                SSD1306Command.SSD1306_CMD_SET_MUX_RATIO.code,
-                0x3F,
-                // Set the display offset to 0
-                SSD1306Command.SSD1306_CMD_SET_DISPLAY_OFFSET.code,
-                0x00,
-                // Display start line to 0
-                SSD1306Command.SSD1306_CMD_SET_DISPLAY_START_LINE.code,
-                // Mirror the x-axis. In case you set it up such that the pins are north.
-                // 0xA0 - in case pins are south - default
-                SSD1306Command.SSD1306_CMD_SET_SEGMENT_REMAP.code,
-                // Mirror the y-axis. In case you set it up such that the pins are north.
-                // 0xC0 - in case pins are south - default
-                SSD1306Command.SSD1306_CMD_SET_COM_SCAN_MODE.code,
-                // Default - alternate COM pin map
-                SSD1306Command.SSD1306_CMD_SET_COM_PIN_MAP.code,
-                0x12,
-                // set contrast
-                SSD1306Command.SSD1306_CMD_SET_CONTRAST.code,
-                0x7F,
-                // Set display to enable rendering from GDDRAM
-                // (Graphic Display Data RAM)
-                SSD1306Command.SSD1306_CMD_DISPLAY_RAM.code,
-                // Normal mode!
-                SSD1306Command.SSD1306_CMD_DISPLAY_NORMAL.code,
-                // Default oscillator clock
-                SSD1306Command.SSD1306_CMD_SET_DISPLAY_CLK_DIV.code,
-                0x80,
-                // Enable the charge pump
-                SSD1306Command.SSD1306_CMD_SET_CHARGE_PUMP.code,
-                0x14,
-                // Set precharge cycles to high cap type
-                SSD1306Command.SSD1306_CMD_SET_PRECHARGE.code,
-                0x22,
-                // Set the V_COMH deselect volatage to max
-                SSD1306Command.SSD1306_CMD_SET_VCOMH_DESELCT.code,
-                0x30,
-                // Horizonatal addressing mode - same as the KS108 GLCD
-                SSD1306Command.SSD1306_CMD_SET_MEMORY_ADDR_MODE.code,
-                0x00,
-                // Turn the Display ON
-                SSD1306Command.SSD1306_CMD_DISPLAY_ON.code
-            ).map {
-                // print(it.toString(16).padStart(2, '0') + " ")
-                it.toByte()
-            }.toByteArray()
-            )
+        launch(newSingleThreadContext("Renderer_${d}")) {
+            d.write(SSD1306Command.initDisplay)
+
+            val stepp = 64
+
+            val r = Random(System.currentTimeMillis())
+            val smallBuf = ByteArray(1 + stepp)
+            smallBuf[0] = SSD1306Command.SSD1306_CTRL_BYTE_DATA_STREAM.code.toByte()
 
             while (true) {
                 measureTime {
-                    d.write(
-                        listOf(
-                            SSD1306Command.SSD1306_CTRL_BYTE_CMD_STREAM.code,
-                            // column 0 to 127
-                            SSD1306Command.SSD1306_CMD_SET_COLUMN_RANGE.code,
-                            0x00,
-                            0x7F,
-                            // page 0 to 7
-                            SSD1306Command.SSD1306_CMD_SET_PAGE_RANGE.code,
-                            0x00,
-                            0x07
-                        ).map {
-                            // print(it.toString(16).padStart(2, '0') + " ")
-                            it.toByte()
-                        }.toByteArray()
-                    )
+                    d.write(SSD1306Command.writePrefix)
 
-                    val r = Random(System.currentTimeMillis())
-                    val buffer = ByteArray(1024) { 0x0A.toByte() }
-                    if ((System.currentTimeMillis() / 1000) % 2 == 0L) {
+                    val buffer = ByteArray(1024) { 0 }
+                    val currSec = (System.currentTimeMillis() / 1000)
+                    if (currSec % 3 == 1L) {
                         r.nextBytes(buffer)
+                    } else if (currSec % 3 == 2L) {
+                        // buffer.fill(0xaa.toByte())
+                        System.arraycopy((bi.data.dataBuffer as DataBufferByte).data, 0, buffer, 0, stepp)
                     }
-
-                    val stepp = 1024
-                    val smallBuf = ByteArray(1 + stepp)
-                    smallBuf[0] = SSD1306Command.SSD1306_CTRL_BYTE_DATA_STREAM.code.toByte()
 
                     for (off in 0 until buffer.size step stepp) {
                         System.arraycopy(buffer, off, smallBuf, 1, stepp)
                         d.write(smallBuf)
                     }
                 }.let {
-                    println("${it.inWholeMilliseconds} ms")
+                    d.lastFrames.tryEmit(it.inWholeMilliseconds)
                 }
 
                 delay(25)

@@ -22,6 +22,8 @@ dependencies {
 
     implementation("org.jetbrains.kotlin:kotlin-reflect:${kotlinVersion}")
 
+    implementation("com.google.guava:guava:31.0.1-jre")
+
     implementation("io.vertx:vertx-core:4.2.3")
     implementation("io.vertx:vertx-web:4.2.3")
     implementation("io.vertx:vertx-lang-kotlin:4.2.3")
