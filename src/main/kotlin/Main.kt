@@ -13,11 +13,7 @@ import java.awt.Font
 import java.awt.RenderingHints
 import java.awt.image.BufferedImage
 import java.awt.image.DataBufferByte
-import java.io.ByteArrayOutputStream
-import java.nio.file.Files
-import java.nio.file.Path
 import java.util.*
-import javax.imageio.ImageIO
 import kotlin.experimental.or
 import kotlin.reflect.full.isSubclassOf
 import kotlin.reflect.full.primaryConstructor
@@ -27,11 +23,11 @@ import kotlin.time.measureTime
 
 enum class DeviceData {
     FRAMES {
-        override fun dataFlow(d: I2CConnection): Flow<String> =
+        override fun dataFlow(d: SSD1306Display): Flow<String> =
             d.lastFrames.map { "<div>$it</div>" }
     },
     WRITES {
-        override fun dataFlow(d: I2CConnection): Flow<String> =
+        override fun dataFlow(d: SSD1306Display): Flow<String> =
             d.lastWrites.map { "<div>${it.joinToString("&nbsp;") { byte ->
                 byte.toInt()
                     .and(0xff)
@@ -42,7 +38,7 @@ enum class DeviceData {
     },
     ;
 
-    abstract fun dataFlow(d: I2CConnection): Flow<String>
+    abstract fun dataFlow(d: SSD1306Display): Flow<String>
 }
 
 @OptIn(ExperimentalTime::class)
@@ -52,7 +48,7 @@ fun main(args: Array<String>) = runBlocking {
 
     val devices = args.map { ds ->
         val splits = ds.split(":")
-        I2CConnection::class.sealedSubclasses.firstOrNull {
+        SSD1306Display::class.sealedSubclasses.firstOrNull {
             it.simpleName?.lowercase(Locale.ENGLISH) == splits[0]
         }?.primaryConstructor?.let { pc ->
             pc.call(
@@ -143,14 +139,35 @@ fun main(args: Array<String>) = runBlocking {
             }
 
             router.get("/devices").coroutineHandler {
+                val dev = rc.request().getParam("device")?.let { id ->  devices.firstOrNull { it.id == id } }
+                if (dev != null) {
+                    val inverted = rc.request().getParam("inverted") == "on"
+                    val contrast = rc.request().getParam("contrast").toIntOrNull()?.let { it / 255.0 }
+                    dev.setInvert(inverted)
+                    if (contrast != null) {
+                        dev.setContrast(contrast)
+                    }
+                }
+
                 htmlAsFlow(flow {
                     html("Devices") {
                         emit(devices.joinToString("<br/>") { dev ->
-                            "${dev.name}: " + DeviceData.values().joinToString("&nbsp;") { dd ->
-                                "<a href='./${
-                                    dd.name.lowercase(Locale.ENGLISH)
-                                }?device=${dev.id}'>${dd.name.lowercase(Locale.ENGLISH)}</a>"
-                            } + "&nbsp;" + "<a href='./screen?device=${dev.id}'>screen</a>"
+                            """
+                            <form action="/devices">  ${dev.name}: ${
+                                DeviceData.values().joinToString("&nbsp;") { dd ->
+                                    "<a href='./${
+                                        dd.name.lowercase(Locale.ENGLISH)
+                                    }?device=${dev.id}'>${dd.name.lowercase(Locale.ENGLISH)}</a>"
+                                }
+                            }&nbsp;<a href='./screen?device=${dev.id}'>screen</a>
+                            
+                            <label>Inverted<input type='checkbox' name='inverted' ${if (dev.invert.value) "checked" else ""} /></label>
+                            <label>Contrast<input type="range" name="contrast" min="0" max="255" value="${(dev.contrast.value * 255).toInt().and(0xff)}"/></label>
+                            
+                            <input type='hidden' name='device' value='${dev.id}'/>
+                            <input type='submit'/>
+                            </form>
+                            """
                         })
                     }
                 })
@@ -166,14 +183,34 @@ fun main(args: Array<String>) = runBlocking {
 
                 htmlAsFlow(flow {
                     html("Screen") {
+                        val scr = Array<Array<Boolean>>(64) {
+                            Array<Boolean>(128) { false }
+                        }
+
                         if (dev == null) {
                             emit("Device ${devId} not found")
                         } else {
-                            emit("<pre id='screen'></pre>")
-                            emitAll(dev.screenFlow.map { ba_ ->
-                                val scr = Array<Array<Boolean>>(64) {
-                                    Array<Boolean>(128) { false }
+                            emit("""
+                                <style>
+                                pre {
+                                    font-family: "courier new", courier, monospace;
+                                    font-size: 14px;
+                                    line-height: 0.85;
                                 }
+                                </style>""")
+                            emit("<div>Time:<b id='timer'>---</b>, count:<b id='index'></b></div>")
+                            emit("<pre id='screen'></pre>")
+                            var index = 0
+                            emitAll(dev.screenFlow.map { (tm, ba_) ->
+                                index++
+                                scr.forEach { line ->
+                                    line.indices.forEach {
+                                        line[it] = false
+                                    }
+                                }
+
+                                val invert = dev.invert.value
+
                                 ba_.withIndex().forEach { (idx, b) ->
                                     val x = idx % 128
                                     val yy = idx / 128 * 8
@@ -182,13 +219,22 @@ fun main(args: Array<String>) = runBlocking {
                                     }
                                 }
                                 """
-                                    <script>
+                                    <script class='tempScript'>
+                                        // Remove prev state
+                                        var elements = document.getElementsByClassName("tempScript");
+                                        while(elements.length > 0){
+                                            elements[0].parentNode.removeChild(elements[0]);
+                                        }
+
+                                        document.getElementById("timer").innerText = $tm;
+                                        document.getElementById("index").innerText = $index;
                                         var f = document.getElementById("screen");
-                                        f.innerHTML = "${
+                                        f.innerText = "${
+                                            
                                             scr.withIndex().joinToString("\\n") { (idx, chunk) ->
                                                     idx.toString().padStart(2, '0') + " " +  
                                                     chunk.joinToString("") { 
-                                                        if (it) "X" else "."
+                                                        if (it != invert) "W" else "."
                                                     }
                                                 } 
                                         }";
@@ -245,9 +291,9 @@ fun main(args: Array<String>) = runBlocking {
     val ig2 = bi.createGraphics()
     ig2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
-    val font = Font("Arial", Font.BOLD, height)
+    val font = Font("Arial", Font.PLAIN, height / 4)
     ig2.font = font
-    val message = "Hell"
+    val message = "Всем чмоке!"
 
     val c = Color.WHITE
     val color = Color.BLACK
@@ -274,18 +320,12 @@ fun main(args: Array<String>) = runBlocking {
 
     devices.forEach { d ->
         launch(newSingleThreadContext("Renderer_${d}")) {
-            d.write(SSD1306Command.initDisplay)
-
-            val stepp = 64
+            d.init()
 
             val r = Random(System.currentTimeMillis())
-            val smallBuf = ByteArray(1 + stepp)
-            smallBuf[0] = SSD1306Command.SSD1306_CTRL_BYTE_DATA_STREAM.code.toByte()
 
             while (true) {
                 measureTime {
-                    d.write(SSD1306Command.writePrefix)
-
                     val buffer = ByteArray(1024) { 0 }
                     val currSec = (System.currentTimeMillis() / 1000)
                     // buffer.fill(0xaa.toByte())
@@ -306,22 +346,14 @@ fun main(args: Array<String>) = runBlocking {
                             }
                         }
                     } else {
+                        /*
                         System.arraycopy(ByteArray(1024) { it.and(0xff).toByte() }, 0,
                             buffer, 0, buffer.size)
-                    }
-
-                    /*
-                    if (currSec % 3 == 1L) {
+                         */
                         r.nextBytes(buffer)
-                    } else if (currSec % 3 == 2L) {
-                        // buffer.fill(0xaa.toByte())
                     }
-                     */
 
-                    for (off in 0 until buffer.size step stepp) {
-                        System.arraycopy(buffer, off, smallBuf, 1, stepp)
-                        d.write(smallBuf)
-                    }
+                    d.writeBuf(buffer)
                 }.let {
                     d.lastFrames.tryEmit(it.inWholeMilliseconds)
                 }

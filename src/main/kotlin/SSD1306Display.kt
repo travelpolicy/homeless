@@ -5,9 +5,11 @@ import com.pi4j.io.i2c.I2C
 import com.pi4j.io.i2c.I2CProvider
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import java.util.*
 
-enum class SSD1306Command(val code: Int) {
+private enum class SSD1306Command(val code: Int) {
     SSD1306_CTRL_BYTE_CMD_SINGLE       (0x80),
     SSD1306_CTRL_BYTE_CMD_STREAM       (0x00),
     SSD1306_CTRL_BYTE_DATA_STREAM      (0x40),
@@ -114,7 +116,7 @@ enum class SSD1306Command(val code: Int) {
     }
 }
 
-sealed class I2CConnection {
+sealed class SSD1306Display {
     abstract val name: String
 
     val lastFrames = MutableSharedFlow<Long>(100, 100, BufferOverflow.DROP_OLDEST)
@@ -124,6 +126,55 @@ sealed class I2CConnection {
     val id: String by lazy {
         Hashing.crc32().hashString(name, Charsets.UTF_8).toString()
     }
+
+    private val buffer = ByteArray(1024)
+    private var bufOffset = 0 // Offset in buffer
+
+    val screenFlow = MutableSharedFlow<Pair<Long, ByteArray>>(1, 1, BufferOverflow.DROP_OLDEST)
+
+    fun init() {
+        write(SSD1306Command.initDisplay)
+        setContrast(contrast.value)
+    }
+
+    val stepp = 64
+    val smallBuf = ByteArray(1 + stepp)
+
+    fun writeBuf(buf: ByteArray) {
+        smallBuf[0] = SSD1306Command.SSD1306_CTRL_BYTE_DATA_STREAM.code.toByte()
+        write(SSD1306Command.writePrefix)
+        for (off in 0 until buf.size step stepp) {
+            System.arraycopy(buf, off, smallBuf, 1, stepp)
+            write(smallBuf)
+        }
+    }
+
+    private val _contrast = MutableStateFlow(0.1)
+
+    fun setContrast(value: Double) {
+        // SSD1306_CMD_SET_CONTRAST takes values from 0 to 255
+        write(listOf(
+            SSD1306Command.SSD1306_CTRL_BYTE_CMD_STREAM.code.toByte(),
+            SSD1306Command.SSD1306_CMD_SET_CONTRAST.code.toByte(),
+            (255 * value).toInt().and(0xff).toByte(),
+        ).toByteArray())
+        _contrast.value = value
+    }
+
+    val contrast = _contrast as StateFlow<Double>
+
+    private val _invert = MutableStateFlow(false)
+    fun setInvert(value: Boolean) {
+        write(listOf(
+            SSD1306Command.SSD1306_CTRL_BYTE_CMD_STREAM.code.toByte(),
+            if (value)
+                SSD1306Command.SSD1306_CMD_DISPLAY_INVERTED.code.toByte()
+            else
+                SSD1306Command.SSD1306_CMD_DISPLAY_NORMAL.code.toByte(),
+        ).toByteArray())
+        _invert.value = value
+    }
+    val invert = _invert as StateFlow<Boolean>
 
     fun write(bytes: ByteArray) {
         lastWrites.tryEmit(bytes)
@@ -138,7 +189,7 @@ sealed class I2CConnection {
                 System.arraycopy(bytes, 1, buffer, bufOffset, bytes.size - 1)
                 bufOffset += bytes.size - 1
 
-                screenFlow.tryEmit(buffer.clone())
+                screenFlow.tryEmit(System.currentTimeMillis() to buffer.clone())
             }
         }
 
@@ -147,7 +198,7 @@ sealed class I2CConnection {
 
     protected abstract fun writeImpl(bytes: ByteArray, offset: Int = 0, length: Int = bytes.size)
 
-    class Linux(val bus: Int, val device: Int) : I2CConnection() {
+    class Linux(val bus: Int, val device: Int) : SSD1306Display() {
         override val name = "${javaClass.simpleName.lowercase(Locale.ENGLISH)}:bus_${bus}:dev_${device.toString(16)}"
 
         val pi4j: Context = Pi4J.newAutoContext()
@@ -164,24 +215,11 @@ sealed class I2CConnection {
         }
     }
 
-    private val buffer = ByteArray(1024)
-    private var bufOffset = 0 // Offset in buffer
-
-    val screenFlow = MutableSharedFlow<ByteArray>(200, 20, BufferOverflow.DROP_OLDEST)
-
     // NOP device
-    class Trace : I2CConnection() {
+    class Trace : SSD1306Display() {
         override val name = "${javaClass.simpleName.lowercase(Locale.ENGLISH)}"
 
         override fun writeImpl(bytes: ByteArray, offset: Int, length: Int) {
-            /*
-            println(bytes
-                .asList()
-                .subList(offset, offset + length)
-                .joinToString(" ") {
-                    it.toInt().and(0xff).toString(16).padStart(2, '0')
-                })
-             */
         }
     }
 }
